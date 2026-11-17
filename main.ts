@@ -6,8 +6,12 @@
 // a quiet hour 1 (small category at 00:00 UTC) ramps far more than a huge one.
 // So for each hour h = 2..24 the median log-ratio ln(v_h / v_1) and its spread
 // are taken from the K = 14 comparables whose hour-1 print is closest to this
-// case's in log space (LOO-validated on 37 comparables: proxy loss 0.265 on
-// big launches vs 0.351 for persistence; overall 0.502 vs 0.930).
+// case's in log space, then the median curve is denoised with a 3-hour moving
+// average (launch curves are smooth intraday shapes; LOO-validated on 37
+// comparables: proxy loss 0.265 on big launches vs 0.351 for persistence;
+// overall 0.502 vs 0.930; smoothing improves all strata slightly).
+// Tested and rejected on the same proxy: LOO bias correction, history-trend
+// tilt, and median shrinkage (all worse on big launches).
 //
 //   q_tau(h) = p1 * exp(med_h + z_tau * sig_h), rounded to 2 decimals,
 //   sig_h = min(max(IQR-sigma of the 14 donors' log-ratios, 0.15*sqrt(h-1)), 2.0)
@@ -96,7 +100,9 @@ const forecastCurve = (p1: number, comps: Comparable[]): { med: number[]; sig: n
     med.push(median(ratios));
     sig.push(clamp(Math.max(iqrSigma(ratios), SIGMA_FLOOR * Math.sqrt(hi + 1)), 0, SIGMA_CAP));
   }
-  return { med, sig };
+  // Denoise the median curve: neighbouring hours share the launch shape.
+  const smooth = med.map((_, i) => (med[Math.max(0, i - 1)] + med[i] + med[Math.min(22, i + 1)]) / 3);
+  return { med: smooth, sig };
 };
 
 mkdirSync(OUTPUT_DIR, { recursive: true });
