@@ -1,17 +1,24 @@
-// gta6-twitch-ccu-forecast-01 entry v1 (Node 22, standard library only).
+// gta6-twitch-ccu-forecast-01 entry v1.2 (Node 22, standard library only).
 //
-// Forecast: log-domain k-nearest-neighbour shape transfer over the case's
+// Forecast: log-domain local-linear shape transfer over the case's
 // comparables. Launch-day Twitch curves share a shape driven by the rolling
 // midnight-local unlock, but the shape's scale depends on how big hour 1 is:
 // a quiet hour 1 (small category at 00:00 UTC) ramps far more than a huge one.
-// So for each hour h = 2..24 the median log-ratio ln(v_h / v_1) and its spread
-// are taken from the K = 14 comparables whose hour-1 print is closest to this
-// case's in log space, then the median curve is denoised with a 3-hour moving
-// average (launch curves are smooth intraday shapes; LOO-validated on 37
-// comparables: proxy loss 0.265 on big launches vs 0.351 for persistence;
-// overall 0.502 vs 0.930; smoothing improves all strata slightly).
-// Tested and rejected on the same proxy: LOO bias correction, history-trend
-// tilt, and median shrinkage (all worse on big launches).
+// Regressing donor log-ratio on log(p1) gives a negative slope in 92% of
+// hour/case fits (mean -0.54, up to -0.92 in late hours), and for a big case
+// the 14 nearest donors are still systematically smaller than the case (only
+// ~2 of 37 donors have p1>=10k) — so a plain median of the nearest donors is
+// biased UP for big launches, the stratum that decides the score. Per hour,
+// fit OLS lr = a + b*lp1 over the K = 14 nearest donors and predict at the
+// case's own log(p1), clamped to the observed donor range (no extrapolation
+// past the biggest donor), slope clamped to [-1.5, 0.5]; degenerate donor
+// spread falls back to the median. The median curve and the IQR sigma curve
+// are each denoised with a 3-hour moving average (launch curves are smooth
+// intraday shapes). LOO-validated on 37 comparables: proxy loss 0.262 on
+// p1>=10k and 0.210 on p1>=50k vs 0.265 / 0.212 for v1.1; overall 0.382 vs
+// 0.502. Tested and rejected on the same proxy: LOO bias correction,
+// history-trend tilt, median shrinkage, sigma x1.1/1.25/1.5, weighted median,
+// smooth5, knn20, knn10, asymsig.
 //
 //   q_tau(h) = p1 * exp(med_h + z_tau * sig_h), rounded to 2 decimals,
 //   sig_h = min(max(IQR-sigma of the 14 donors' log-ratios, 0.15*sqrt(h-1)), 2.0)
@@ -58,6 +65,28 @@ const iqrSigma = (xs: number[]): number => {
 };
 
 /**
+ * Local-linear prediction of the log-ratio at the case's log(p1): OLS fit
+ * over the K nearest donors, evaluated at x0 clamped to the donors' observed
+ * log(p1) range so a huge case never extrapolates past the biggest donor.
+ * Slope clamped to [-1.5, 0.5]; degenerate donor spread falls back to median.
+ */
+const locLin = (xs: number[], ys: number[], x0: number): number => {
+  const n = xs.length;
+  const mx = xs.reduce((a, b) => a + b, 0) / n;
+  const my = ys.reduce((a, b) => a + b, 0) / n;
+  let sxx = 0;
+  let sxy = 0;
+  for (let i = 0; i < n; i++) {
+    sxx += (xs[i] - mx) * (xs[i] - mx);
+    sxy += (xs[i] - mx) * (ys[i] - my);
+  }
+  if (sxx < 1e-9) return median(ys);
+  const b = clamp(sxy / sxx, -1.5, 0.5);
+  const xEval = clamp(x0, Math.min(...xs), Math.max(...xs));
+  return my + b * (xEval - mx);
+};
+
+/**
  * A donor's launch-day log-ratio curve, or null when its release day lacks any
  * of the 24 hourly prints. Hours are UTC whole hours from day_start.
  */
@@ -79,7 +108,7 @@ const donorCurve = (c: Comparable): { lp1: number; lr: number[] } | null => {
   return { lp1, lr: prints.slice(1).map((v) => Math.log(Math.max(v, 1)) - lp1) };
 };
 
-/** Median log-ratio + spread per hour from the K nearest donors in log(p1). */
+/** Local-linear log-ratio + spread per hour from the K nearest donors in log(p1). */
 const forecastCurve = (p1: number, comps: Comparable[]): { med: number[]; sig: number[] } => {
   const donors = comps
     .map(donorCurve)
@@ -93,16 +122,19 @@ const forecastCurve = (p1: number, comps: Comparable[]): { med: number[]; sig: n
   const near = donors
     .sort((a, b) => Math.abs(a.lp1 - lp1) - Math.abs(b.lp1 - lp1))
     .slice(0, K);
+  const xs = near.map((d) => d.lp1);
   const med: number[] = [];
   const sig: number[] = [];
   for (let hi = 0; hi < 23; hi++) {
     const ratios = near.map((d) => d.lr[hi]);
-    med.push(median(ratios));
+    med.push(locLin(xs, ratios, lp1));
     sig.push(clamp(Math.max(iqrSigma(ratios), SIGMA_FLOOR * Math.sqrt(hi + 1)), 0, SIGMA_CAP));
   }
   // Denoise the median curve: neighbouring hours share the launch shape.
   const smooth = med.map((_, i) => (med[Math.max(0, i - 1)] + med[i] + med[Math.min(22, i + 1)]) / 3);
-  return { med: smooth, sig };
+  // Denoise the sigma curve the same way.
+  const smoothSig = sig.map((_, i) => (sig[Math.max(0, i - 1)] + sig[i] + sig[Math.min(22, i + 1)]) / 3);
+  return { med: smooth, sig: smoothSig };
 };
 
 mkdirSync(OUTPUT_DIR, { recursive: true });
