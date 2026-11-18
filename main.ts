@@ -14,7 +14,8 @@
 // past the biggest donor), slope clamped to [-1.5, 0.5]; degenerate donor
 // spread falls back to the median. The median curve and the IQR sigma curve
 // are each denoised with a 3-hour moving average (launch curves are smooth
-// intraday shapes). LOO-validated on 37 comparables: proxy loss 0.262 on
+// intraday shapes); the two curves share one smooth3 helper so the window
+// can never drift apart between them. LOO-validated on 37 comparables: proxy loss 0.262 on
 // p1>=10k and 0.210 on p1>=50k vs 0.265 / 0.212 for v1.1; overall 0.382 vs
 // 0.502. Tested and rejected on the same proxy: LOO bias correction,
 // history-trend tilt, median shrinkage, sigma x1.1/1.25/1.5, weighted median,
@@ -130,11 +131,11 @@ const forecastCurve = (p1: number, comps: Comparable[]): { med: number[]; sig: n
     med.push(locLin(xs, ratios, lp1));
     sig.push(clamp(Math.max(iqrSigma(ratios), SIGMA_FLOOR * Math.sqrt(hi + 1)), 0, SIGMA_CAP));
   }
-  // Denoise the median curve: neighbouring hours share the launch shape.
-  const smooth = med.map((_, i) => (med[Math.max(0, i - 1)] + med[i] + med[Math.min(22, i + 1)]) / 3);
-  // Denoise the sigma curve the same way.
-  const smoothSig = sig.map((_, i) => (sig[Math.max(0, i - 1)] + sig[i] + sig[Math.min(22, i + 1)]) / 3);
-  return { med: smooth, sig: smoothSig };
+  // Denoise the median and sigma curves with the same 3-hour moving
+  // average: neighbouring hours share the launch shape.
+  const smooth3 = (xs: number[]): number[] =>
+    xs.map((_, i) => (xs[Math.max(0, i - 1)] + xs[i] + xs[Math.min(xs.length - 1, i + 1)]) / 3);
+  return { med: smooth3(med), sig: smooth3(sig) };
 };
 
 mkdirSync(OUTPUT_DIR, { recursive: true });
